@@ -1,0 +1,250 @@
+# ==============================================================================
+# PROYECTO: Evolución de Perfiles Latentes en Estudiantes de PEB (2024 - 2026)
+# ==============================================================================
+
+# 1. Cargando librerías
+library(tidyverse)
+library(tidyLPA)
+library(readxl)
+
+# 2. Cargar y estandarizar bases por cohorte 
+# Ajusta las rutas a tus archivos Excel
+leer_y_preparar <- function(path, anio) {
+  read_excel(path) %>%
+    rename_with(tolower) %>%
+    mutate(
+      cohorte = as.factor(anio),
+      # Asegurar cálculo de escolaridad consistente si no viene precalculado
+      rendimiento_escolar = if ("rendimiento_escolar" %in% names(.)) {
+        as.numeric(rendimiento_escolar)
+      } else {
+        (as.numeric(nem) + as.numeric(ranking)) / 2
+      },
+      paes_lenguaje = as.numeric(paes_lenguaje),
+      paes_m1 = as.numeric(paes_m1),
+      sexo = as.factor(sexo),
+      nse_colegio = as.factor(nse_colegio),
+      rama = as.factor(rama)
+    )
+}
+
+df_2024 <- leer_y_preparar("basepeb_filtrada_2024.xlsx", 2024)
+df_2025 <- leer_y_preparar("basepeb_filtrada_2025.xlsx", 2025)
+df_2026 <- leer_y_preparar("basepeb_filtrada_2026.xlsx", 2026)
+
+# Unir las tres cohortes
+base_total <- bind_rows(df_2024, df_2025, df_2026)
+
+# 3. Filtrar casos completos en las variables continuas de perfilamiento 
+datos_lpa <- base_total %>%
+  filter(!is.na(rendimiento_escolar) & !is.na(paes_lenguaje) & !is.na(paes_m1))
+
+# 4. Estimación del modelo de 3 clases (tidyLPA) 
+# Usamos el modelo con varianzas iguales entre clases, covarianzas fijadas en 0
+# Acá puse directamente el código con 3 clases, pero originalmente probé de 3 a 5 y comparaba esas métricas 
+# o se puede especificar variances = "varying" si se busca flexibilizar la dispersión.
+modelo_3clases <- datos_lpa %>%
+  select(rendimiento_escolar, paes_lenguaje, paes_m1) %>%
+  estimate_profiles(n_profiles = 3, models = 2)
+
+# Extraer métricas de ajuste del modelo
+print("Métricas de ajuste del modelo de 3 clases:")
+print(get_fit(modelo_3clases))
+
+# Obtener asignación de clases (datos con asignación más probable)
+datos_con_clases <- get_data(modelo_3clases)
+
+# Incorporar la clase asignada a la base completa de trabajo
+datos_finales <- datos_lpa %>%
+  mutate(clase = as.factor(datos_con_clases$Class))
+
+# ==============================================================================
+# 5. CÁLCULO DE ESTADÍSTICOS DESCRIPTIVOS Y EVOLUCIÓN TEMPORAL
+# ==============================================================================
+
+# 5.1 Evolución de la composición y promedios continuos por Cohorte y Clase
+tabla_continuas_evolucion <- datos_finales %>%
+  group_by(cohorte, clase) %>%
+  summarise(
+    n = n(),
+    rendimiento_escolar_mean = mean(rendimiento_escolar, na.rm = TRUE),
+    rendimiento_escolar_sd   = sd(rendimiento_escolar, na.rm = TRUE),
+    paes_lenguaje_mean       = mean(paes_lenguaje, na.rm = TRUE),
+    paes_lenguaje_sd         = sd(paes_lenguaje, na.rm = TRUE),
+    paes_m1_mean             = mean(paes_m1, na.rm = TRUE),
+    paes_m1_sd               = sd(paes_m1, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  group_by(cohorte) %>%
+  mutate(
+    prop_anual = round(100 * n / sum(n), 2),
+    across(where(is.numeric), ~ round(.x, 2))
+  )
+
+print("Evolución de composición (%) y medias de puntajes por cohorte y clase:")
+print(tabla_continuas_evolucion)
+
+# 5.2 Composición por Género (por Cohorte y Clase)
+tabla_genero_evolucion <- datos_finales %>%
+  filter(!is.na(sexo)) %>%
+  group_by(cohorte, clase, sexo) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(cohorte, clase) %>%
+  mutate(porcentaje = round(100 * n / sum(n), 2)) %>%
+  select(-n) %>%
+  pivot_wider(names_from = sexo, values_from = porcentaje, names_prefix = "genero_")
+
+print("Evolución de distribución de Género (%) por cohorte y clase:")
+print(tabla_genero_evolucion)
+
+# 5.3 Composición por NSE de Colegio (por Cohorte y Clase)
+tabla_nse_evolucion <- datos_finales %>%
+  filter(!is.na(nse_colegio)) %>%
+  group_by(cohorte, clase, nse_colegio) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(cohorte, clase) %>%
+  mutate(porcentaje = round(100 * n / sum(n), 2)) %>%
+  select(-n) %>%
+  pivot_wider(names_from = nse_colegio, values_from = porcentaje, names_prefix = "NSE_")
+
+print("Evolución de distribución de NSE (%) por cohorte y clase:")
+print(tabla_nse_evolucion)
+
+# 5.4 Composición por Rama Educacional (por Cohorte y Clase)
+tabla_rama_evolucion <- datos_finales %>%
+  filter(!is.na(rama)) %>%
+  group_by(cohorte, clase, rama) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(cohorte, clase) %>%
+  mutate(porcentaje = round(100 * n / sum(n), 2)) %>%
+  select(-n) %>%
+  pivot_wider(names_from = rama, values_from = porcentaje, names_prefix = "Rama_")
+
+print("Evolución de distribución por Rama Educacional (%) por cohorte y clase:")
+print(tabla_rama_evolucion)
+
+# 6. Guardar base final consolidada --------------------------------------------
+write.csv(datos_finales, "base_peb_2024_2026_clasificada.csv", row.names = FALSE)
+
+#Que se vea el cálculo año a año
+library(tidyverse)
+
+# Supongamos que tu base con las clases asignadas se llama 'datos_finales'
+# y tiene las columnas: cohorte, clase, rendimiento_escolar, paes_lenguaje, paes_m1
+
+anio_analisis <- 2026  # Cambia al año que quieras analizar (2024, 2025 o 2026)
+
+# 1. Filtrar base para el año de interés
+datos_anio <- datos_finales %>%
+  filter(cohorte == anio_analisis)
+
+# 2. Resumen por Clase (Perfiles 1, 2 y 3)
+tabla_clases <- datos_anio %>%
+  group_by(clase) %>%
+  summarise(
+    n = n(),
+    rendimiento_escolar = round(mean(rendimiento_escolar, na.rm = TRUE), 0),
+    paes_lenguaje       = round(mean(paes_lenguaje, na.rm = TRUE), 0),
+    paes_m1             = round(mean(paes_m1, na.rm = TRUE), 0),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    # Proporción con formato porcentual y coma decimal (ej. 29,6%)
+    `Proporción de estudiantes en cada clase` = paste0(
+      format(round((n / sum(n)) * 100, 1), nsmall = 1, decimal.mark = ","), "%"
+    ),
+    `Perfil (Class)` = paste("Clase", clase)
+  ) %>%
+  select(
+    `Perfil (Class)`,
+    `Rendimiento escolar` = rendimiento_escolar,
+    `PAES Lenguaje`       = paes_lenguaje,
+    `PAES M1`             = paes_m1,
+    `Proporción de estudiantes en cada clase`
+  )
+
+# 3. Fila de Promedio Total PEB del año
+fila_promedio_peb <- datos_anio %>%
+  summarise(
+    `Perfil (Class)` = "Promedio PEB",
+    `Rendimiento escolar` = round(mean(rendimiento_escolar, na.rm = TRUE), 0),
+    `PAES Lenguaje`       = round(mean(paes_lenguaje, na.rm = TRUE), 0),
+    `PAES M1`             = round(mean(paes_m1, na.rm = TRUE), 0),
+    `Proporción de estudiantes en cada clase` = "-"
+  )
+
+# 4. Unir perfiles con el promedio PEB
+tabla_resumen_final <- bind_rows(tabla_clases, fila_promedio_peb)
+
+# Visualizar en consola
+print(tabla_resumen_final)
+
+# (Opcional) Copiar directamente al portapapeles para pegar en Excel (Ctrl + V)
+# clipr::write_clip(tabla_resumen_final)
+
+#library(tidyverse)
+
+# ==============================================================================
+# 1. FUNCIÓN AUXILIAR PARA CALCULAR PORCENTAJES CON FORMATO
+# ==============================================================================
+calcular_proporciones <- function(data, variable, nombre_var) {
+  data %>%
+    filter(!is.na({{ variable }})) %>%
+    count({{ variable }}, name = "n") %>%
+    mutate(
+      Variable = nombre_var,
+      Categoria = as.character({{ variable }}),
+      Porcentaje_num = round((n / sum(n)) * 100, 2),
+      Porcentaje = paste0(format(Porcentaje_num, nsmall = 1, decimal.mark = ","), "%")
+    ) %>%
+    select(Variable, Categoria, n, Porcentaje)
+}
+
+# ==============================================================================
+# 2. PROPORCIONES PARA TODA LA MUESTRA COMBINADA (Total 2024 - 2026)
+# ==============================================================================
+# Asumiendo que tu base conjunta se llama 'datos_finales' o 'base_total'
+
+prop_genero_total <- calcular_proporciones(datos_finales, sexo, "Género")
+prop_nse_total    <- calcular_proporciones(datos_finales, nse_colegio, "NSE Establecimiento")
+prop_rama_total   <- calcular_proporciones(datos_finales, rama, "Rama Educacional")
+
+# Consolidar en una única tabla para toda la muestra
+tabla_sociodemo_total <- bind_rows(
+  prop_genero_total,
+  prop_nse_total,
+  prop_rama_total
+)
+
+print("Distribución sociodemográfica para toda la muestra consolidada (2024-2026):")
+print(tabla_sociodemo_total)
+
+# ==============================================================================
+# 3. PROPORCIONES POR AÑO / COHORTE (Evolución de la muestra general)
+# ==============================================================================
+# Si quieres ver cómo se distribuyen estas variables en cada año (ej. 2024, 2025, 2026):
+
+calcular_proporciones_cohorte <- function(data, variable, nombre_var) {
+  data %>%
+    filter(!is.na({{ variable }})) %>%
+    group_by(cohorte, {{ variable }}) %>%
+    summarise(n = n(), .groups = "drop") %>%
+    group_by(cohorte) %>%
+    mutate(
+      Variable = nombre_var,
+      Categoria = as.character({{ variable }}),
+      Porcentaje_num = round((n / sum(n)) * 100, 2),
+      Porcentaje = paste0(format(Porcentaje_num, nsmall = 1, decimal.mark = ","), "%")
+    ) %>%
+    select(cohorte, Variable, Categoria, n, Porcentaje)
+}
+
+tabla_sociodemo_anual <- bind_rows(
+  calcular_proporciones_cohorte(datos_finales, sexo, "Género"),
+  calcular_proporciones_cohorte(datos_finales, nse_colegio, "NSE Establecimiento"),
+  calcular_proporciones_cohorte(datos_finales, rama, "Rama Educacional")
+)
+
+print("Distribución sociodemográfica por cohorte/año:")
+print(tabla_sociodemo_anual)
+
